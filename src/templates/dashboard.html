@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Dashboard - SMS Trade Bot</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .dashboard {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .section {
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .balance-info {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+        .balance-card {
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 5px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        .logout {
+            float: right;
+        }
+    </style>
+    <script>
+        function updateDashboard() {
+            // Здесь будет код для обновления данных через API
+            setTimeout(updateDashboard, 5000);
+        }
+        window.onload = updateDashboard;
+    </script>
+</head>
+<body>
+    <div class="dashboard">
+        <div class="section">
+            <h1>SMS Trade Bot Dashboard
+                <a href="/logout" class="logout">Logout</a>
+            </h1>
+            <div class="balance-info">
+                <div class="balance-card">
+                    <h3>Starting Balance</h3>
+                    <p id="starting-balance">Loading...</p>
+                </div>
+                <div class="balance-card">
+                    <h3>Current Balance</h3>
+                    <p id="current-balance">Loading...</p>
+                </div>
+                <div class="balance-card">
+                    <h3>Profit/Loss</h3>
+                    <p id="profit-loss">Loading...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Recent Signals</h2>
+            <table id="signals-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Symbol</th>
+                        <th>Type</th>
+                        <th>Price</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Данные будут добавляться динамически -->
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2>Active Trades</h2>
+            <table id="trades-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Entry Price</th>
+                        <th>Current Price</th>
+                        <th>P/L</th>
+                        <th>Duration</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Данные будут добавляться динамически -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>

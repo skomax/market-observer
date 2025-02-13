@@ -1,0 +1,192 @@
+import telegram
+import logging
+from datetime import datetime
+import asyncio
+from typing import Optional, Dict, Any
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+class TelegramHandler:
+    def __init__(self, token: str, channel_id: str):
+        self.bot = telegram.Bot(token=token)
+        self.channel_id = channel_id
+        self.message_queue = asyncio.Queue()
+        logger.info(f"Telegram handler initialized for channel: {channel_id}")
+
+    async def send_analysis_update(self, symbol: str, data: Dict[str, Any]):
+        """Отправка обновления анализа"""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            current_price = data['current_price']
+            ema20 = data['ema20']
+            ema50 = data['ema50']
+            rsi = data.get('rsi', 0)
+            
+            # Определение тренда
+            trend = "DOWNTREND" if current_price < ema20 < ema50 else \
+                   "UPTREND" if current_price > ema20 > ema50 else "SIDEWAYS"
+            
+            # Расчет расстояния от цены до EMA в процентах
+            ema20_distance = ((current_price - ema20) / ema20) * 100
+            ema50_distance = ((current_price - ema50) / ema50) * 100
+            
+            # Определение силы тренда
+            trend_strength = "Strong" if abs(ema20_distance) > 1 else "Moderate" if abs(ema20_distance) > 0.5 else "Weak"
+            
+            # Формирование рекомендации
+            if trend == "UPTREND":
+                if rsi > 70:
+                    recommendation = "⚠️ OVERBOUGHT - Consider Taking Profits"
+                else:
+                    recommendation = "🟢 BULLISH - Consider Long Positions"
+            elif trend == "DOWNTREND":
+                if rsi < 30:
+                    recommendation = "⚠️ OVERSOLD - Watch for Reversal"
+                else:
+                    recommendation = "🔴 BEARISH - Consider Short Positions"
+            else:
+                recommendation = "⚪️ NEUTRAL - Wait for Clear Signal"
+
+            # Формирование сообщения
+            message = (
+                f"📊 Market Analysis Update\n\n"
+                f"Symbol: {symbol}\n"
+                f"Current Price: {current_price:.8f}\n\n"
+                f"Technical Indicators:\n"
+                f"EMA20: {ema20:.8f} ({ema20_distance:+.2f}%)\n"
+                f"EMA50: {ema50:.8f} ({ema50_distance:+.2f}%)\n"
+                f"RSI: {rsi:.2f}\n\n"
+                f"Analysis:\n"
+                f"Trend: {trend} ({trend_strength})\n"
+                f"Recommendation: {recommendation}\n\n"
+                f"Additional Info:\n"
+                f"• Price-EMA20 Gap: {abs(ema20_distance):.2f}%\n"
+                f"• Price-EMA50 Gap: {abs(ema50_distance):.2f}%\n"
+                f"Time: {timestamp}"
+            )
+            
+            await self.bot.send_message(
+                chat_id=self.channel_id,
+                text=message,
+                parse_mode=telegram.ParseMode.HTML
+            )
+            logger.info(f"Analysis update sent for {symbol}")
+            
+        except Exception as e:
+            logger.error(f"Error sending analysis update: {str(e)}")
+
+    async def send_signal(self, symbol: str, signal_type: str, price: float, analysis_info: str):
+        """Отправка торгового сигнала"""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Определение эмодзи и цвета для типа сигнала
+            signal_emoji = "🟢" if signal_type == "BUY" else "🔴"
+            
+            message = (
+                f"{signal_emoji} Trading Signal\n\n"
+                f"Symbol: {symbol}\n"
+                f"Action: {signal_type}\n"
+                f"Price: {price:.8f}\n\n"
+                f"Analysis:\n{analysis_info}\n\n"
+                f"Risk Management:\n"
+                f"• Set Stop Loss: -{1:.2f}%\n"
+                f"• Take Profit 1: +{2:.2f}%\n"
+                f"• Take Profit 2: +{3:.2f}%\n\n"
+                f"Time: {timestamp}"
+            )
+            
+            await self.bot.send_message(
+                chat_id=self.channel_id,
+                text=message,
+                parse_mode=telegram.ParseMode.HTML
+            )
+            logger.info(f"Signal sent: {symbol} {signal_type}")
+            
+        except Exception as e:
+            logger.error(f"Error sending signal: {str(e)}")
+
+    async def send_trade_result(self, symbol: str, entry_price: float, 
+                              exit_price: float, profit_loss: float, duration: str):
+        """Отправка результата сделки"""
+        try:
+            profit_percent = (profit_loss / entry_price) * 100
+            
+            result_emoji = "🟢" if profit_loss > 0 else "🔴"
+            
+            message = (
+                f"📊 Trade Result {result_emoji}\n\n"
+                f"Symbol: {symbol}\n"
+                f"Entry Price: {entry_price:.8f}\n"
+                f"Exit Price: {exit_price:.8f}\n"
+                f"P/L: {profit_loss:.8f} ({profit_percent:.2f}%)\n"
+                f"Duration: {duration}\n\n"
+                f"Performance Metrics:\n"
+                f"• ROI: {profit_percent:.2f}%\n"
+                f"• Annualized Return: {(profit_percent * 365 / float(duration.split()[0])):.2f}%\n"
+                f"• Risk/Reward Ratio: {abs(profit_percent):.2f}"
+            )
+            
+            await self.bot.send_message(
+                chat_id=self.channel_id,
+                text=message,
+                parse_mode=telegram.ParseMode.HTML
+            )
+            logger.info(f"Trade result sent: {symbol} P/L: {profit_loss:.8f}")
+            
+        except Exception as e:
+            logger.error(f"Error sending trade result: {str(e)}")
+
+    async def send_daily_summary(self, total_trades: int, successful_trades: int, 
+                               total_profit_loss: float, win_rate: float):
+        """Отправка ежедневной сводки"""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d")
+            
+            message = (
+                f"📈 Daily Trading Summary ({timestamp})\n\n"
+                f"Performance Metrics:\n"
+                f"• Total Trades: {total_trades}\n"
+                f"• Successful Trades: {successful_trades}\n"
+                f"• Win Rate: {win_rate:.2f}%\n"
+                f"• Total P/L: {total_profit_loss:.8f} USDT\n\n"
+                f"Risk Metrics:\n"
+                f"• Average Win: {total_profit_loss/successful_trades:.8f} USDT\n"
+                f"• Win/Loss Ratio: {win_rate/(100-win_rate):.2f}\n"
+                f"• Sharpe Ratio: {(total_profit_loss/total_trades)/(total_profit_loss/successful_trades):.2f}\n\n"
+                f"Status: {'🟢 Profitable Day' if total_profit_loss > 0 else '🔴 Loss Day'}"
+            )
+            
+            await self.bot.send_message(
+                chat_id=self.channel_id,
+                text=message,
+                parse_mode=telegram.ParseMode.HTML
+            )
+            logger.info(f"Daily summary sent")
+            
+        except Exception as e:
+            logger.error(f"Error sending daily summary: {str(e)}")
+
+    async def send_error(self, error_message: str, error_type: Optional[str] = None):
+        """Отправка уведомления об ошибке"""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            message = (
+                f"⚠️ Error Alert\n\n"
+                f"Time: {timestamp}\n"
+                f"Type: {error_type if error_type else 'General Error'}\n"
+                f"Message: {error_message}"
+            )
+            
+            await self.bot.send_message(
+                chat_id=self.channel_id,
+                text=message,
+                parse_mode=telegram.ParseMode.HTML
+            )
+            logger.info(f"Error alert sent: {error_type}")
+            
+        except Exception as e:
+            logger.error(f"Error sending error alert: {str(e)}")

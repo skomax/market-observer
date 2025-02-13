@@ -1,0 +1,420 @@
+import os
+from dotenv import load_dotenv
+from datetime import datetime
+import logging
+from src.binance_handler import BinanceHandler
+from src.telegram_handler import TelegramHandler
+from src.database_handler import DatabaseHandler
+from src.web_interface import start_web_server
+from src.risk_manager import RiskManager
+from src.trading_manager import TradingManager
+import threading
+import time
+import asyncio
+import pandas as pd
+import numpy as np
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class TradingBot:
+    def __init__(self):
+        load_dotenv()
+        self.trading_mode = os.getenv('TRADING_MODE')
+        self.trading_pairs = os.getenv('TRADING_PAIRS').split(',')
+        self.check_interval = int(os.getenv('CHECK_INTERVAL', 60))
+        
+        self.binance = BinanceHandler(
+            api_key=os.getenv(f'BINANCE_API_KEY_{self.trading_mode.upper()}'),
+            api_secret=os.getenv(f'BINANCE_SECRET_KEY_{self.trading_mode.upper()}'),
+            testnet=(self.trading_mode == 'test')
+        )
+        
+        self.telegram = TelegramHandler(
+            token=os.getenv('TELEGRAM_BOT_TOKEN'),
+            channel_id=os.getenv('TELEGRAM_CHANNEL_ID')
+        )
+        
+        self.db = DatabaseHandler()
+        self.risk_manager = RiskManager()
+        self.trading_manager = TradingManager()
+        
+        self.starting_balance = None
+        self.current_balance = None
+        self.active_trades = {}
+        self.last_signals = []
+        
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        
+        # Настройки индикаторов
+        self.indicator_settings = {
+            'ema_short': 20,
+            'ema_long': 50,
+            'rsi_period': 14,
+            'rsi_overbought': 70,
+            'rsi_oversold': 30
+        }
+        
+        logger.info(f"Trading Bot initialized in {self.trading_mode} mode")
+        logger.info(f"Trading pairs: {', '.join(self.trading_pairs)}")
+
+    def calculate_indicators(self, data):
+        """Расчет технических индикаторов"""
+        try:
+            # EMA
+            data['EMA20'] = data['close'].ewm(span=self.indicator_settings['ema_short'], 
+                                            adjust=False).mean()
+            data['EMA50'] = data['close'].ewm(span=self.indicator_settings['ema_long'], 
+                                            adjust=False).mean()
+            
+            # RSI
+            delta = data['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(
+                window=self.indicator_settings['rsi_period']).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(
+                window=self.indicator_settings['rsi_period']).mean()
+            rs = gain / loss
+            data['RSI'] = 100 - (100 / (1 + rs))
+            
+            # Волатильность
+            data['Volatility'] = data['close'].rolling(window=20).std()
+            
+            # ATR (Average True Range)
+            data['TR'] = np.maximum(
+                data['high'] - data['low'],
+                np.maximum(
+                    abs(data['high'] - data['close'].shift()),
+                    abs(data['low'] - data['close'].shift())
+                )
+            )
+            data['ATR'] = data['TR'].rolling(window=14).mean()
+            
+            return data
+            
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {str(e)}")
+            return data
+
+    async def init_websockets(self):
+        """Инициализация WebSocket подключений"""
+        for pair in self.trading_pairs:
+            await self.binance.start_symbol_ticker_socket(pair)
+
+    def run_websocket_loop(self):
+        """Запуск цикла событий для WebSocket"""
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.init_websockets())
+        self.loop.run_forever()
+
+    def update_balance(self):
+        """Обновление баланса"""
+        try:
+            if self.starting_balance is None:
+                self.starting_balance = self.binance.get_account_balance()
+            self.current_balance = self.binance.get_account_balance()
+        except Exception as e:
+            logger.error(f"Error updating balance: {str(e)}")
+    def display_console_info(self):
+        """Отображение информации в консоли"""
+        try:
+            os.system('clear')
+            print("=" * 50)
+            print("SMS TRADE BOT - Trading Dashboard")
+            print("=" * 50)
+            print(f"Mode: {self.trading_mode.upper()}")
+            print(f"Starting Balance: {self.starting_balance:.2f} USDT")
+            print(f"Current Balance: {self.current_balance:.2f} USDT")
+            profit_loss = self.current_balance - self.starting_balance
+            print(f"Profit/Loss: {profit_loss:.2f} USDT ({(profit_loss/self.starting_balance)*100:.2f}%)")
+            print("=" * 50)
+            
+            # Отображение торгового статуса
+            trading_status = self.trading_manager.get_trading_status()
+            print("\nTrading Status:")
+            print("-" * 50)
+            print(f"Orders Today: {trading_status['daily_orders']}/{trading_status['max_daily_orders']}")
+            print(f"Trading Hours: {trading_status['trading_hours']}")
+            print(f"Trading Active: {'Yes' if trading_status['is_trading_time'] else 'No'}")
+            
+            # Отображение последних сигналов
+            print("\nRecent Signals:")
+            print("-" * 50)
+            for signal in self.last_signals[-5:]:
+                print(f"Symbol: {signal['symbol']} | Type: {signal['type']} | "
+                      f"Price: {signal['price']:.8f} | Time: {signal['timestamp']}")
+            
+            # Отображение активных сделок
+            print("\nActive Trades:")
+            print("-" * 50)
+            for symbol, trade in self.active_trades.items():
+                current_price = self.binance.get_current_price(symbol)
+                if current_price:
+                    profit_loss = (current_price - trade['entry_price']) * trade['quantity']
+                    profit_percent = (profit_loss / (trade['entry_price'] * trade['quantity'])) * 100
+                    duration = datetime.now() - trade['timestamp']
+                    print(f"Symbol: {symbol} | Entry: {trade['entry_price']:.8f} | "
+                          f"Current: {current_price:.8f} | P/L: {profit_loss:.2f} USDT ({profit_percent:.2f}%) | "
+                          f"Duration: {duration}")
+        
+        except Exception as e:
+            logger.error(f"Error displaying console info: {str(e)}")
+
+    def analyze_data(self, data, symbol):
+        """Анализ данных и генерация торговых сигналов"""
+        try:
+            if not self.trading_manager.can_check_signals(symbol):
+                return None
+
+            if data is None or data.empty:
+                return None
+
+            signals = []
+            
+            # Расчет индикаторов
+            data = self.calculate_indicators(data)
+            
+            # Получаем последние значения
+            last_row = data.iloc[-1]
+            prev_row = data.iloc[-2]
+            
+            # Подготовка данных для анализа
+            analysis_data = {
+                'current_price': float(last_row['close']),
+                'ema20': float(last_row['EMA20']),
+                'ema50': float(last_row['EMA50']),
+                'rsi': float(last_row['RSI']),
+                'volatility': float(last_row['Volatility']),
+                'atr': float(last_row['ATR'])
+            }
+            
+            # Определение тренда
+            trend = "UPTREND" if last_row['EMA20'] > last_row['EMA50'] else "DOWNTREND"
+            trend_strength = abs(last_row['EMA20'] - last_row['EMA50']) / last_row['EMA50'] * 100
+            
+            # Анализ условий для сигналов
+            # Сигнал на покупку
+            if (prev_row['EMA20'] <= prev_row['EMA50'] and 
+                last_row['EMA20'] > last_row['EMA50'] and
+                last_row['RSI'] > self.indicator_settings['rsi_oversold'] and 
+                last_row['RSI'] < self.indicator_settings['rsi_overbought']):
+                
+                signals.append({
+                    'symbol': symbol,
+                    'type': 'BUY',
+                    'price': last_row['close'],
+                    'timestamp': last_row.name,
+                    'analysis': {
+                        'trend': trend,
+                        'trend_strength': trend_strength,
+                        'rsi': last_row['RSI'],
+                        'volatility': last_row['Volatility'],
+                        'atr': last_row['ATR']
+                    }
+                })
+            
+            # Сигнал на продажу    
+            elif (prev_row['EMA20'] >= prev_row['EMA50'] and 
+                  last_row['EMA20'] < last_row['EMA50'] and
+                  last_row['RSI'] > self.indicator_settings['rsi_oversold'] and 
+                  last_row['RSI'] < self.indicator_settings['rsi_overbought']):
+                
+                signals.append({
+                    'symbol': symbol,
+                    'type': 'SELL',
+                    'price': last_row['close'],
+                    'timestamp': last_row.name,
+                    'analysis': {
+                        'trend': trend,
+                        'trend_strength': trend_strength,
+                        'rsi': last_row['RSI'],
+                        'volatility': last_row['Volatility'],
+                        'atr': last_row['ATR']
+                    }
+                })
+            
+            # Отправка анализа в Telegram
+            asyncio.run(self.telegram.send_analysis_update(symbol, analysis_data))
+            
+            if signals:
+                self.trading_manager.register_signal(symbol)
+            
+            return signals
+            
+        except Exception as e:
+            logger.error(f"Error analyzing data: {str(e)}")
+            return None
+    def process_signals(self, signals, symbol):
+        """Обработка торговых сигналов"""
+        try:
+            if not signals:
+                return
+
+            if not self.trading_manager.can_place_order(symbol):
+                return
+
+            for signal in signals:
+                if not self.risk_manager.check_trade_allowed(self.current_balance, symbol):
+                    continue
+
+                current_price = self.binance.get_current_price(symbol)
+                if not current_price:
+                    continue
+
+                # Расчет размера позиции с учетом анализа
+                quantity = self.risk_manager.calculate_lot_size(
+                    self.current_balance,
+                    current_price,
+                    volatility=signal['analysis']['volatility']
+                )
+
+                if quantity <= 0:
+                    continue
+
+                # Расчет уровней stop-loss и take-profit на основе ATR
+                atr = signal['analysis']['atr']
+                stop_loss_pct = (atr * 2) / current_price * 100
+                take_profit_pct = stop_loss_pct * 1.5
+
+                order = self.binance.place_order(symbol, signal['type'], quantity)
+                
+                if order:
+                    self.trading_manager.register_order(symbol)
+                    
+                    signal_id = self.db.save_signal(
+                        symbol=symbol,
+                        signal_type=signal['type'],
+                        price=current_price
+                    )
+                    
+                    if signal['type'] == 'BUY':
+                        self.active_trades[symbol] = {
+                            'entry_price': current_price,
+                            'quantity': quantity,
+                            'signal_id': signal_id,
+                            'timestamp': datetime.now(),
+                            'stop_loss': current_price * (1 - stop_loss_pct/100),
+                            'take_profit': current_price * (1 + take_profit_pct/100)
+                        }
+                    else:
+                        if symbol in self.active_trades:
+                            trade = self.active_trades[symbol]
+                            profit_loss = (current_price - trade['entry_price']) * trade['quantity']
+                            
+                            self.db.save_trade(
+                                symbol=symbol,
+                                entry_price=trade['entry_price'],
+                                exit_price=current_price,
+                                quantity=trade['quantity'],
+                                entry_time=trade['timestamp'],
+                                exit_time=datetime.now(),
+                                profit_loss=profit_loss
+                            )
+                            
+                            self.risk_manager.update_trade_stats(profit_loss, 'WIN' if profit_loss > 0 else 'LOSS')
+                            
+                            del self.active_trades[symbol]
+                    
+                    # Отправка расширенного сигнала в Telegram
+                    analysis_info = (
+                        f"Technical Analysis:\n"
+                        f"• Trend: {signal['analysis']['trend']}\n"
+                        f"• Trend Strength: {signal['analysis']['trend_strength']:.2f}%\n"
+                        f"• RSI: {signal['analysis']['rsi']:.2f}\n"
+                        f"• Volatility: {signal['analysis']['volatility']:.2f}%\n\n"
+                        f"Risk Management:\n"
+                        f"• Stop Loss: {stop_loss_pct:.2f}%\n"
+                        f"• Take Profit: {take_profit_pct:.2f}%"
+                    )
+                    
+                    asyncio.run(self.telegram.send_signal(
+                        symbol=symbol,
+                        signal_type=signal['type'],
+                        price=current_price,
+                        analysis_info=analysis_info
+                    ))
+                    
+                    self.last_signals.append(signal)
+                    if len(self.last_signals) > 10:
+                        self.last_signals.pop(0)
+                        
+        except Exception as e:
+            logger.error(f"Error processing signals: {str(e)}")
+
+    def run(self):
+        """Основной цикл работы бота"""
+        try:
+            # Запуск веб-интерфейса только если он включен
+            if os.getenv('WEB_INTERFACE_ENABLED', 'true').lower() == 'true':
+                web_thread = threading.Thread(target=start_web_server)
+                web_thread.daemon = True
+                web_thread.start()
+                logger.info("Web interface started")
+            else:
+                logger.info("Web interface disabled")
+
+            # Запуск WebSocket в отдельном потоке
+            ws_thread = threading.Thread(target=self.run_websocket_loop)
+            ws_thread.daemon = True
+            ws_thread.start()
+
+            self.update_balance()
+            
+            while True:
+                try:
+                    time.sleep(self.check_interval)
+                    
+                    for pair in self.trading_pairs:
+                        # Получение исторических данных
+                        historical_data = self.binance.get_historical_data(pair)
+                        
+                        if historical_data is not None:
+                            # Анализ данных и генерация сигналов
+                            signals = self.analyze_data(historical_data, pair)
+                            
+                            # Обработка сигналов
+                            if signals:
+                                self.process_signals(signals, pair)
+                    
+                    self.update_balance()
+                    
+                    # Отображаем консольную информацию только если веб-интерфейс отключен
+                    if os.getenv('WEB_INTERFACE_ENABLED', 'true').lower() != 'true':
+                        self.display_console_info()
+                        
+                except Exception as e:
+                    logger.error(f"Error in main loop: {str(e)}")
+                    time.sleep(60)
+                    
+        except KeyboardInterrupt:
+            self.cleanup()
+        except Exception as e:
+            logger.error(f"Unexpected error: {str(e)}")
+            self.cleanup()
+
+    def cleanup(self):
+        """Очистка ресурсов перед завершением работы"""
+        try:
+            self.loop.run_until_complete(self.binance.cleanup())
+            self.loop.close()
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+
+if __name__ == "__main__":
+    bot = TradingBot()
+    try:
+        bot.run()
+    except KeyboardInterrupt:
+        logger.info("Stopping bot...")
+        bot.cleanup()
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        bot.cleanup()
